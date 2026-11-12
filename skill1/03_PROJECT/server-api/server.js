@@ -9,7 +9,7 @@ const PROJECT = process.env.VIDEO_PROJECT || path.resolve(__dirname, '../remotio
 const requireProject = createRequire(path.join(PROJECT, 'package.json'));
 const SCENES = path.join(PROJECT, 'src/scenes.json');
 const CONFIG = path.join(PROJECT, 'src/video-config.json');
-const OUTPUT = path.join(PROJECT, 'out/video.mp4');
+const OUTPUT = path.resolve(__dirname, '../../05_FINAL/video.mp4');
 const PORT = Number(process.env.PORT || 3001);
 const app = express();
 app.use(express.static(path.join(__dirname, '../web-dashboard/public')));
