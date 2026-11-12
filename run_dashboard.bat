@@ -1,24 +1,85 @@
 @echo off
 setlocal
-set "ROOT=D:\editvideochatgpt"
-set "SERVER=%ROOT%\server"
-set "EDITOR=%ROOT%\skill1\03_PROJECT\my-editor"
+title editvideochatgpt - Launcher
+
+set "ROOT=D:\editvideochatgpt\skill1\03_PROJECT"
+set "SERVER=%ROOT%\server-api"
+set "REMOTION=%ROOT%\remotion-engine"
+set "VIDEO_PROJECT=%REMOTION%"
+set "PORT=3001"
+
+where node.exe >nul 2>&1
+if errorlevel 1 (
+  echo ERROR: Khong tim thay Node.js trong PATH.
+  goto :failed
+)
+
+where npm.cmd >nul 2>&1
+if errorlevel 1 (
+  echo ERROR: Khong tim thay npm trong PATH.
+  goto :failed
+)
 
 if not exist "%SERVER%\server.js" (
-  echo ERROR: server.js not found.
-  pause
-  exit /b 1
+  echo ERROR: Khong tim thay %SERVER%\server.js
+  goto :failed
 )
 
-if not exist "%EDITOR%\package.json" (
-  echo ERROR: Remotion package.json not found.
-  pause
-  exit /b 1
+if not exist "%REMOTION%\package.json" (
+  echo ERROR: Khong tim thay %REMOTION%\package.json
+  goto :failed
 )
 
-start "Video Dashboard - Node" /min /D "%SERVER%" cmd /k "node server.js"
-start "Video Dashboard - Remotion" /min /D "%EDITOR%" cmd /k "npm run dev -- --port=3000 --no-open"
+call :portBusy 3001
+if errorlevel 1 (
+  echo Dang khoi dong Server API...
+  start "LOG - Server API 3001" /D "%SERVER%" cmd /k "node server.js"
+) else (
+  echo Cong 3001 dang duoc su dung. Se kiem tra API.
+)
 
-timeout /t 3 /nobreak >nul
+call :portBusy 3000
+if errorlevel 1 (
+  echo Dang khoi dong Remotion Studio...
+  start "LOG - Remotion 3000" /D "%REMOTION%" cmd /k "npm run dev -- --port=3000 --no-open"
+) else (
+  echo Cong 3000 dang duoc su dung. Se kiem tra Studio.
+)
+
+echo.
+echo Dang cho API va Studio san sang, toi da khoang 60 giay...
+
+powershell.exe -NoProfile -Command ^
+  "$timer = [Diagnostics.Stopwatch]::StartNew();" ^
+  "while ($timer.Elapsed.TotalSeconds -lt 60) {" ^
+  "  try {" ^
+  "    $api = Invoke-RestMethod 'http://127.0.0.1:3001/api/state' -TimeoutSec 2;" ^
+  "    if ($null -eq $api.scenes -or $null -eq $api.config) { throw 'API sai dinh dang' };" ^
+  "    $studio = Invoke-WebRequest 'http://localhost:3000/MyComposition' -UseBasicParsing -TimeoutSec 2;" ^
+  "    if ($studio.StatusCode -eq 200) { exit 0 };" ^
+  "  } catch {};" ^
+  "  Start-Sleep -Seconds 1;" ^
+  "}; exit 1"
+
+if errorlevel 1 (
+  echo.
+  echo ERROR: API hoac Studio chua san sang.
+  echo Kiem tra hai cua so LOG; cong 3000/3001 co the bi ung dung khac chiem.
+  goto :failed
+)
+
+echo He thong san sang. Dang mo Dashboard...
 start "" "http://127.0.0.1:3001"
 endlocal
+exit /b 0
+
+:portBusy
+powershell.exe -NoProfile -Command ^
+  "if (Get-NetTCPConnection -LocalPort %1 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+exit /b %errorlevel%
+
+:failed
+echo.
+pause
+endlocal
+exit /b 1

@@ -5,11 +5,11 @@ const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 const {createRequire} = require('node:module');
 
-const PROJECT = process.env.VIDEO_PROJECT || path.resolve(__dirname, '../skill1/03_PROJECT/my-editor');
+const PROJECT = process.env.VIDEO_PROJECT || path.resolve(__dirname, '../remotion-engine');
 const requireProject = createRequire(path.join(PROJECT, 'package.json'));
 const SCENES = path.join(PROJECT, 'src/scenes.json');
 const CONFIG = path.join(PROJECT, 'src/video-config.json');
-const OUTPUT = path.join(PROJECT, 'out/video.mp4');
+const OUTPUT = path.resolve(__dirname, '../../05_FINAL/video.mp4');
 const PORT = Number(process.env.PORT || 3001);
 const app = express();
 let busy = false;
@@ -158,7 +158,7 @@ app.post('/api/render', (req, res) => {
   if (!fs.existsSync(path.join(PROJECT, 'public/input.mp4'))) throw fail('Thiếu public/input.mp4');
   const cli = path.join(path.dirname(requireProject.resolve('@remotion/cli/package.json')), 'remotion-cli.js');
   const saved = saveUpdates(req.body);
-  const tempOutput = path.join(PROJECT, 'out/video-rendering.mp4');
+  const tempOutput = path.join(path.dirname(OUTPUT), 'video-rendering.mp4');
   const active = startJob('render', process.execPath,
     [cli, 'render', 'MyComposition', tempOutput, '--codec=h264'], () => {
       if (!fs.existsSync(tempOutput) || !fs.statSync(tempOutput).size) throw fail('Không tạo được MP4');
@@ -172,7 +172,7 @@ app.post('/api/sync', (req, res) => {
   fs.mkdirSync(backupDir, {recursive: true});
   fs.copyFileSync(SCENES, path.join(backupDir, `scenes-${Date.now()}.json`));
   const active = startJob('sync', process.env.PYTHON_EXE || 'python',
-    [path.join(PROJECT, 'build_scenes.py')], () => {readScenes();});
+    [path.resolve(__dirname, '../python-scripts/build_scenes.py')], () => {readScenes();});
   res.status(202).json({job: active});
 });
 app.get('/download/video.mp4', (req, res, next) => {
@@ -181,7 +181,7 @@ app.get('/download/video.mp4', (req, res, next) => {
 });
 app.use('/api', (req, res) => res.status(404).json({error: 'API không tồn tại'}));
 app.use('/media', express.static(path.join(PROJECT, 'public')));
-app.use(express.static(path.join(__dirname, 'public'), {
+app.use(express.static(path.resolve(__dirname, '../web-dashboard/public'), {
   etag: false, setHeaders: (res) => res.set('Cache-Control', 'no-store'),
 }));
 app.use((error, req, res, next) => {
@@ -194,7 +194,7 @@ async function main() {
   const esbuild = requireProject('esbuild');
   await esbuild.build({
     entryPoints: [path.join(PROJECT, 'dashboard/App.tsx')], bundle: true,
-    outfile: path.join(__dirname, 'public/dashboard.js'), platform: 'browser',
+    outfile: path.resolve(__dirname, '../web-dashboard/public/dashboard.js'), platform: 'browser',
     format: 'iife', jsx: 'automatic', target: ['chrome110'], minify: true,
     nodePaths: requireProject.resolve.paths('react') || [],
     define: {'process.env.NODE_ENV': '"production"'},

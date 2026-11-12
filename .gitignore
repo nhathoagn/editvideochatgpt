@@ -24,3 +24,6 @@ source/
 *.pyc
 .DS_Store
 Thumbs.db
+
+**/.env
+*.bak

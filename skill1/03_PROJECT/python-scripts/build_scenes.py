@@ -10,4 +10,4 @@ scenes = [
     if s["end"] > s["start"] and s["text"].strip()
 ]
 output = json.dumps({"scenes": scenes}, ensure_ascii=False, indent=2)
-(base / "src" / "scenes.json").write_text(output, encoding="utf-8")
+(base.parent / "remotion-engine" / "src" / "scenes.json").write_text(output, encoding="utf-8")
