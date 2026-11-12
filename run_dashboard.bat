@@ -2,7 +2,9 @@
 setlocal
 title editvideochatgpt - Launcher
 
-set "ROOT=D:\editvideochatgpt\skill1\03_PROJECT"
+:: Tu dong nhan dien thu muc chua file .bat nay tren bat ky may tinh nao
+set "BASE_DIR=%~dp0"
+set "ROOT=%BASE_DIR%skill1\03_PROJECT"
 set "SERVER=%ROOT%\server-api"
 set "REMOTION=%ROOT%\remotion-engine"
 set "VIDEO_PROJECT=%REMOTION%"
@@ -10,7 +12,7 @@ set "PORT=3001"
 
 where node.exe >nul 2>&1
 if errorlevel 1 (
-  echo ERROR: Khong tim thay Node.js trong PATH.
+  echo ERROR: Khong tim thay Node.js trong PATH. Vui long cai dat Node.js truoc.
   goto :failed
 )
 
@@ -27,6 +29,17 @@ if not exist "%SERVER%\server.js" (
 
 if not exist "%REMOTION%\package.json" (
   echo ERROR: Khong tim thay %REMOTION%\package.json
+  goto :failed
+)
+
+:: Kiem tra xem da chay setup.bat chua
+if not exist "%SERVER%\node_modules" (
+  echo ERROR: Chua cai dat thu vien! Vui long chay file setup.bat truoc.
+  goto :failed
+)
+
+if not exist "%REMOTION%\node_modules" (
+  echo ERROR: Chua cai dat thu vien! Vui long chay file setup.bat truoc.
   goto :failed
 )
 
