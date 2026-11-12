@@ -1,0 +1,10 @@
+{
+  "name": "editvideochatgpt",
+  "version": "2.0.0",
+  "private": true,
+  "workspaces": [
+    "server-api",
+    "web-dashboard",
+    "remotion-engine"
+  ]
+}
