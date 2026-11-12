@@ -2,12 +2,253 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Video Dashboard 2.0</title>
-  <link rel="stylesheet" href="/dashboard.css">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dashboard Studio 2.1</title>
+  <link rel="stylesheet" href="dashboard.css">
 </head>
 <body>
-  <div id="root"><p style="padding:24px">Đang tải Dashboard 2.0…</p></div>
-  <script src="/dashboard.js" defer></script>
+  <header>
+    <div class="brand">VIDEO DASHBOARD <span>STUDIO 2.1</span></div>
+    <button id="reload">Tải lại cảnh</button>
+    <button id="save">Lưu ngay / Thử lại</button>
+    <button id="sync">Đồng bộ Python</button>
+    <button id="render">Xuất MP4</button>
+    <a id="download" href="/download/video.mp4" hidden>Tải MP4</a>
+  </header>
+  <p id="status" role="status" aria-live="polite">Đang tải…</p>
+  <details id="logs" hidden><summary>Log tác vụ</summary><pre id="log"></pre></details>
+  <main>
+    <aside class="left">
+      <div class="bar"><strong>Kịch bản</strong><span id="count"></span></div>
+      <div id="scenes"></div>
+    </aside>
+    <section>
+      <div class="bar">
+        <strong>Preview & Timeline</strong>
+        <span id="connection">Đang nối Studio…</span>
+        <a href="http://localhost:3000/MyComposition" target="_blank" rel="noopener">Mở riêng ↗</a>
+        <button id="refresh">↻ Studio</button>
+      </div>
+      <iframe id="studio" title="Remotion Studio và Timeline" src="http://localhost:3000/MyComposition" allowfullscreen></iframe>
+    </section>
+    <aside class="right">
+      <div class="bar"><strong>Định dạng phụ đề</strong><span id="selected"></span></div>
+      <fieldset id="inspector" disabled>
+        <label class="control">Font chữ<select id="fontFamily"><option>Arial</option><option>Tahoma</option><option>Verdana</option><option>Georgia</option><option>Times New Roman</option></select></label>
+        <label class="control">Độ đậm<select id="fontWeight"><option value="400">Thường</option><option value="700">Đậm</option><option value="900">Rất đậm</option></select></label>
+        <div id="ranges"></div>
+        <div class="colors">
+          <label>Màu chữ<input id="color" type="color"></label>
+          <label>Màu nền<input id="backgroundColor" type="color"></label>
+          <label>Màu viền<input id="strokeColor" type="color"></label>
+        </div>
+        <label class="control">Hiệu ứng xuất hiện<select id="effect"><option value="none">Không hiệu ứng</option><option value="fade">Hiện dần</option><option value="pop">Phóng nhẹ</option><option value="slide">Trượt lên</option></select></label>
+        <button id="drag">Bật kéo chữ trong Preview</button>
+        <button id="reset">Đặt lại định dạng cảnh</button>
+        <button id="apply">Áp dụng kiểu cho tất cả</button>
+        <p class="hint">Tự lưu sau 400 ms ngừng chỉnh. Preview nhận thay đổi ngay.<br>Tắt kéo chữ khi phát thử để xem đúng hiệu ứng.</p>
+      </fieldset>
+    </aside>
+  </main>
+<script>
+const $ = id => document.getElementById(id);
+const CHANNEL = 'dashboard-studio-v21';
+const STUDIO_ORIGIN = new URL($('studio').src).origin;
+const defaults = {fontSize:52,positionX:50,positionY:220,maxWidth:87,fontFamily:'Arial',fontWeight:700,
+  color:'#ffffff',backgroundColor:'#000000',backgroundOpacity:.55,strokeWidth:0,strokeColor:'#000000',effect:'none'};
+const fields = [
+  ['fontSize','Cỡ chữ',16,160,1],['positionX','Vị trí ngang (%)',0,100,.1],
+  ['positionY','Cách đáy (px)',0,1880,1],['maxWidth','Chiều rộng (%)',20,100,1],
+  ['backgroundOpacity','Độ đậm nền',0,1,.05],['strokeWidth','Độ dày viền',0,8,.5]
+];
+let scenes=[], revision='', config=null, selectedId='', loaded=false, locked=true, editing=false;
+let timer=null, saving=null, blocked=false, instance=null, lastReady=0, pendingSeek=null, requestId=0, saveError='';
+const pending=new Map(), rows=new Map();
+const find = id => scenes.find(s=>String(s.id)===String(id));
+const styleOf = s => Object.fromEntries(Object.keys(defaults).map(k=>[k,s?.[k]??defaults[k]]));
+function status(text,error=false){$('status').textContent=text;$('status').classList.toggle('error',error);}
+function controls(){
+  document.querySelectorAll('header button,#refresh,#scenes textarea,#scenes button').forEach(el=>el.disabled=locked||!loaded);
+  $('reload').disabled=locked;
+  $('inspector').disabled=locked||!find(selectedId);
+}
+async function api(url,body){
+  const response=await fetch(url,{cache:'no-store',...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})});
+  const raw=await response.text();let data;
+  try{data=JSON.parse(raw);}catch{throw new Error(`HTTP ${response.status}: phản hồi không phải JSON`);}
+  if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`);
+  return data;
+}
+function send(data){$('studio').contentWindow?.postMessage({channel:CHANNEL,...data},STUDIO_ORIGIN);}
+function preview(){if(loaded)send({type:'SNAPSHOT',scenes,selectedId,editing,locked});}
+function fillInspector(){
+  $('selected').textContent=selectedId;
+  const style=styleOf(find(selectedId));
+  for(const key of Object.keys(defaults)){
+    $(key).value=style[key];
+    if($(key+'Value'))$(key+'Value').textContent=style[key];
+  }
+  $('drag').textContent=editing?'Tắt kéo chữ / Xem hiệu ứng':'Bật kéo chữ trong Preview';
+  controls();
+}
+function selectScene(id,seekToStart=true){
+  if(locked||!find(id))return;
+  selectedId=String(id);
+  rows.forEach((row,key)=>row.card.classList.toggle('selected',key===selectedId));
+  fillInspector();preview();
+  if(seekToStart){
+    pendingSeek={type:'SEEK',requestId:++requestId,seconds:find(id).start};
+    send(pendingSeek);
+  }
+}
+function queue(id,patch){
+  if(locked)return;
+  const scene=find(id);if(!scene)return;
+  const clean={};
+  for(const [key,value] of Object.entries(patch))if(key==='text'||Object.hasOwn(defaults,key))clean[key]=value;
+  Object.assign(scene,clean);
+  pending.set(String(id),{...pending.get(String(id)),...clean});
+  const row=rows.get(String(id));
+  if(row&&row.input.value!==scene.text)row.input.value=scene.text;
+  preview();clearTimeout(timer);
+  status(blocked?`Chưa lưu: ${saveError}`:'Đang chỉnh · Chưa lưu…',blocked);
+  if(!blocked)timer=setTimeout(()=>flush().catch(report),400);
+}
+function report(error){status(error.message,true);}
+function flush(){
+  clearTimeout(timer);
+  if(saving)return saving;
+  if(blocked)return Promise.reject(new Error('Tự lưu đang dừng. Bấm Lưu ngay / Thử lại hoặc tải lại sau khi sao chép dữ liệu.'));
+  if(!pending.size)return Promise.resolve();
+  saving=(async()=>{
+    while(pending.size){
+      const batch=new Map(pending);pending.clear();status('Đang tự lưu…');
+      try{
+        const result=await api('/api/save',{revision,updates:[...batch].map(([id,patch])=>({id,...patch}))});
+        revision=result.revision;
+      }catch(error){
+        for(const [id,patch] of batch)pending.set(id,{...patch,...pending.get(id)});
+        blocked=true;saveError=error.message;throw error;
+      }
+    }
+    status('Đã tự lưu ✓');
+  })().finally(()=>{saving=null;});
+  return saving;
+}
+function makeCards(){
+  rows.clear();$('scenes').replaceChildren();
+  for(const scene of scenes){
+    const id=String(scene.id),card=document.createElement('article');
+    const button=document.createElement('button'),input=document.createElement('textarea');
+    button.className='scene-title';button.textContent=`${id} · ${scene.start.toFixed(2)} → ${scene.end.toFixed(2)}s`;
+    input.value=scene.text;input.setAttribute('aria-label',`Lời thoại ${id}`);
+    card.onclick=()=>selectScene(id);
+    button.onclick=e=>{e.stopPropagation();selectScene(id);};
+    input.onclick=e=>{e.stopPropagation();if(selectedId!==id)selectScene(id);};
+    input.onfocus=()=>{if(selectedId!==id)selectScene(id);};
+    input.oninput=()=>queue(id,{text:input.value});
+    card.append(button,input);$('scenes').append(card);rows.set(id,{card,input});
+    card.classList.toggle('selected',id===selectedId);
+  }
+  $('count').textContent=`${scenes.length} cảnh`;
+}
+async function load(){
+  const data=await api('/api/state');
+  scenes=data.scenes;revision=data.revision;config=data.config;loaded=true;
+  if(!find(selectedId))selectedId=String(scenes[0]?.id??'');
+  pending.clear();blocked=false;$('positionY').max=config.height-40;
+  makeCards();fillInspector();preview();return data;
+}
+async function waitJob(id){
+  for(;;){
+    const {job}=await api('/api/job');
+    if(!job||job.id!==id)throw new Error('Không tìm thấy tác vụ. Kiểm tra server và thư mục out.');
+    $('logs').hidden=false;$('log').textContent=job.log||'';
+    if(job.status==='error')throw new Error(job.error||'Tác vụ lỗi; xem log.');
+    if(job.status==='done'){
+      if(job.kind==='render')$('download').hidden=false;
+      return job;
+    }
+    status(`${job.kind==='render'?'Đang xuất MP4':'Đang đồng bộ Python'}… ${Math.floor((Date.now()-job.startedAt)/1000)}s`);
+    await new Promise(resolve=>setTimeout(resolve,800));
+  }
+}
+async function run(task){
+  if(locked)return;
+  locked=true;controls();send({type:'PAUSE'});preview();
+  try{await task();}catch(error){report(error);}
+  finally{locked=false;controls();preview();}
+}
+for(const [key,label,min,max,step] of fields){
+  const wrap=document.createElement('label');wrap.className='control';
+  wrap.innerHTML=`<span>${label}<output id="${key}Value"></output></span><input id="${key}" type="range" min="${min}" max="${max}" step="${step}">`;
+  $('ranges').append(wrap);
+}
+for(const key of Object.keys(defaults))$(key).oninput=()=>{
+  const value=typeof defaults[key]==='number'?Number($(key).value):$(key).value;
+  if($(key+'Value'))$(key+'Value').textContent=value;
+  queue(selectedId,{[key]:value});
+};
+$('save').onclick=()=>run(async()=>{blocked=false;await flush();status('Đã lưu ✓');});
+$('reload').onclick=()=>{
+  if((pending.size||saving)&&!confirm('Bỏ thay đổi chưa lưu và tải lại? Hãy sao chép lời thoại cần giữ trước.'))return;
+  run(async()=>{
+    clearTimeout(timer);if(saving)await saving.catch(()=>{});
+    const data=await load();
+    if(data.job?.status==='running'){await waitJob(data.job.id);await load();}
+    status('Đã tải dữ liệu mới nhất.');
+  });
+};
+$('render').onclick=()=>run(async()=>{
+  await flush();editing=false;fillInspector();preview();$('download').hidden=true;
+  const data=await api('/api/render',{revision,updates:[]});revision=data.revision;
+  const job=await waitJob(data.job.id);status(`Hoàn tất: ${job.output}`);
+});
+$('sync').onclick=()=>{
+  if(!confirm('Python sẽ tạo lại lời thoại và định dạng. Bản hiện tại được tự lưu rồi sao lưu vào out/backups. Tiếp tục?'))return;
+  run(async()=>{await flush();const data=await api('/api/sync',{revision});await waitJob(data.job.id);await load();status('Đồng bộ hoàn tất.');});
+};
+$('reset').onclick=()=>{queue(selectedId,defaults);fillInspector();};
+$('apply').onclick=()=>{
+  if(!confirm('Áp dụng định dạng cảnh đang chọn cho tất cả cảnh?'))return;
+  const style=styleOf(find(selectedId));for(const scene of scenes)queue(scene.id,style);
+};
+$('drag').onclick=()=>{editing=!editing;send({type:'PAUSE'});fillInspector();preview();};
+$('refresh').onclick=()=>{instance=null;lastReady=0;$('studio').src='http://localhost:3000/MyComposition';};
+$('studio').onload=()=>{instance=null;send({type:'HELLO'});};
+window.addEventListener('message',event=>{
+  if(event.origin!==STUDIO_ORIGIN||event.source!==$('studio').contentWindow||event.data?.channel!==CHANNEL)return;
+  const data=event.data;
+  if(data.type==='READY'){
+    lastReady=Date.now();$('connection').textContent=`Đã nối · ${data.fps} fps`;
+    if(instance!==data.instance){instance=data.instance;preview();}
+    if(pendingSeek)send(pendingSeek);
+  }
+  if(data.type==='SEEKED'&&pendingSeek?.requestId===data.requestId){
+    pendingSeek=null;
+    if(data.clamped)status('Cảnh vượt thời lượng Composition. Kiểm tra video-config.json.',true);
+  }
+  if(data.type==='FRAME'&&Number.isFinite(data.frame)&&config){
+    rows.forEach((row,id)=>{const s=find(id);row.card.classList.toggle('active',data.frame>=Math.round(s.start*config.fps)&&data.frame<Math.round(s.end*config.fps));});
+  }
+  if(data.type==='SELECT'&&!locked)selectScene(data.id,false);
+  if(data.type==='PATCH'&&!locked&&editing&&data.patch&&typeof data.patch==='object'){
+    queue(data.id,data.patch);if(String(data.id)===selectedId)fillInspector();
+  }
+});
+setInterval(()=>{
+  send({type:'HELLO'});
+  if(Date.now()-lastReady>5000)$('connection').textContent='Chưa nối · Kiểm tra Studio cổng 3000';
+},1500);
+window.addEventListener('beforeunload',event=>{
+  if(pending.size||saving||locked){event.preventDefault();event.returnValue='';}
+});
+controls();
+(async()=>{
+  try{const data=await load();if(data.job?.status==='running'){await waitJob(data.job.id);await load();}status('Sẵn sàng · Tự lưu đang bật.');}
+  catch(error){report(error);}
+  finally{locked=false;controls();preview();send({type:'HELLO'});}
+})();
+</script>
 </body>
 </html>

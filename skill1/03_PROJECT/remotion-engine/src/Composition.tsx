@@ -1,8 +1,9 @@
-import {useRef} from 'react';
+import {useEffect, useRef, useState} from 'react';
+import {pause, seek} from '@remotion/studio';
 import type {PointerEvent as ReactPointerEvent} from 'react';
 import {
   AbsoluteFill, OffthreadVideo, Sequence, staticFile,
-  useCurrentFrame, useVideoConfig, interpolate,
+  useCurrentFrame, useVideoConfig, interpolate, getRemotionEnvironment,
 } from 'remotion';
 import scenesData from './scenes.json';
 import {clamp, sceneFrame, styleOf} from './editor-model';
@@ -15,7 +16,47 @@ type Editing = {
 };
 export type VideoProps = Editing & {scenes?: Scene[]; videoSrc?: string};
 
-const savedScenes: Scene[] = Array.isArray(scenesData) ? scenesData : scenesData.scenes;
+const savedScenes = (Array.isArray(scenesData) ? scenesData : scenesData.scenes) as Scene[];
+const CHANNEL = 'dashboard-studio-v21';
+const ORIGINS = new Set(['http://127.0.0.1:3001', 'http://localhost:3001']);
+type Snapshot = {scenes: Scene[]; selectedId: string; editing: boolean; locked: boolean};
+
+function useDashboardBridge() {
+  const {fps, durationInFrames} = useVideoConfig();
+  const frame = useCurrentFrame();
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const parentOrigin = useRef<string | null>(null);
+  const send = (data: Record<string, unknown>) => {
+    if (parentOrigin.current) window.parent.postMessage({channel: CHANNEL, ...data}, parentOrigin.current);
+  };
+  useEffect(() => {
+    if (!getRemotionEnvironment().isStudio || window.parent === window) return;
+    const instance = crypto.randomUUID();
+    const receive = (event: MessageEvent) => {
+      if (event.source !== window.parent || !ORIGINS.has(event.origin) || event.data?.channel !== CHANNEL) return;
+      parentOrigin.current = event.origin;
+      const data = event.data;
+      if (data.type === 'HELLO') send({type: 'READY', instance, fps, durationInFrames});
+      if (data.type === 'SNAPSHOT' && Array.isArray(data.scenes)) {
+        if (!data.scenes.every((s: Scene) => s && typeof s.text === 'string' &&
+          ['string', 'number'].includes(typeof s.id) && Number.isFinite(s.start) && Number.isFinite(s.end))) return;
+        setSnapshot({scenes: data.scenes, selectedId: String(data.selectedId ?? ''),
+          editing: data.editing === true, locked: data.locked === true});
+      }
+      if (data.type === 'SEEK' && Number.isFinite(data.seconds)) {
+        const requested = Math.round(data.seconds * fps);
+        const target = clamp(requested, 0, durationInFrames - 1);
+        pause(); seek(target);
+        send({type: 'SEEKED', requestId: data.requestId, frame: target, clamped: target !== requested});
+      }
+      if (data.type === 'PAUSE') pause();
+    };
+    window.addEventListener('message', receive);
+    return () => window.removeEventListener('message', receive);
+  }, [fps, durationInFrames]);
+  useEffect(() => {send({type: 'FRAME', frame});}, [frame]);
+  return {snapshot, send};
+}
 
 function Caption({scene, editingId, onSelect, onChange}: Editing & {scene: Scene}) {
   const frame = useCurrentFrame();
@@ -103,17 +144,26 @@ function Caption({scene, editingId, onSelect, onChange}: Editing & {scene: Scene
 
 export const MyComposition = ({scenes = savedScenes, videoSrc,
   editingId, onSelect, onChange}: VideoProps) => {
-  const {fps} = useVideoConfig();
+  const {fps, durationInFrames} = useVideoConfig();
+  const {snapshot, send} = useDashboardBridge();
+  const studio = getRemotionEnvironment().isStudio;
+  const list = studio && snapshot ? snapshot.scenes : scenes;
+  const editing = studio && snapshot?.editing && !snapshot.locked;
+  const selected = editing ? snapshot.selectedId : editingId;
+  const select = editing ? (id: string) => {pause(); send({type: 'SELECT', id});} : onSelect;
+  const change = editing ? (id: string, patch: Partial<CaptionStyle>) => send({type: 'PATCH', id, patch}) : onChange;
   return <AbsoluteFill style={{backgroundColor: '#000'}}>
-    <OffthreadVideo src={videoSrc ?? staticFile('input.mp4')} volume={1}
-      style={{position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover'}} />
-    {scenes.map((scene) => {
+    <Sequence name="Video gốc / Âm thanh" from={0} durationInFrames={durationInFrames} premountFor={fps}>
+      <OffthreadVideo name="input.mp4" showInTimeline src={videoSrc ?? staticFile('input.mp4')} volume={1}
+        style={{position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover'}} />
+    </Sequence>
+    {list.map((scene) => {
       const from = sceneFrame(scene, fps);
       const duration = Math.round(scene.end * fps) - from;
       if (duration <= 0) return null;
       return <Sequence key={scene.id} name={`Phụ đề ${scene.id}`} from={from}
         durationInFrames={duration} premountFor={fps}>
-        <Caption scene={scene} editingId={editingId} onSelect={onSelect} onChange={onChange} />
+        <Caption scene={scene} editingId={selected} onSelect={select} onChange={change} />
       </Sequence>;
     })}
   </AbsoluteFill>;
