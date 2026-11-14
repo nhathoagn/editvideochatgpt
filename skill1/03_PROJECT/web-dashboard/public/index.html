@@ -14,6 +14,14 @@
     <button id="sync">Đồng bộ Python</button>
     <button id="render">Xuất MP4</button>
     <a id="download" href="/download/video.mp4" hidden>Tải MP4</a>
+    <button id="sourcesReload">Đọc 01_SOURCE</button>
+
+    <select id="sourceSelect" aria-label="Chọn video nguồn">
+      <option value="">-- Chọn video --</option>
+    </select>
+
+    <button id="openSource">Tạo & mở dự án</button>
+    <span id="projectLabel">Chưa chọn dự án</span>  
   </header>
   <p id="status" role="status" aria-live="polite">Đang tải…</p>
   <details id="logs" hidden><summary>Log tác vụ</summary><pre id="log"></pre></details>
@@ -64,13 +72,28 @@ const fields = [
 let scenes=[], revision='', config=null, selectedId='', loaded=false, locked=true, editing=false;
 let timer=null, saving=null, blocked=false, instance=null, lastReady=0, pendingSeek=null, requestId=0, saveError='';
 const pending=new Map(), rows=new Map();
+let currentProjectId = null;
 const find = id => scenes.find(s=>String(s.id)===String(id));
 const styleOf = s => Object.fromEntries(Object.keys(defaults).map(k=>[k,s?.[k]??defaults[k]]));
 function status(text,error=false){$('status').textContent=text;$('status').classList.toggle('error',error);}
-function controls(){
-  document.querySelectorAll('header button,#refresh,#scenes textarea,#scenes button').forEach(el=>el.disabled=locked||!loaded);
-  $('reload').disabled=locked;
-  $('inspector').disabled=locked||!find(selectedId);
+function controls() {
+  document.querySelectorAll(
+    '#scenes textarea,#scenes button'
+  ).forEach(el => {
+    el.disabled = locked || !loaded;
+  });
+
+  $('reload').disabled = locked;
+  $('refresh').disabled = locked;
+  $('sourcesReload').disabled = locked;
+  $('sourceSelect').disabled = locked;
+  $('openSource').disabled =
+    locked || !$('sourceSelect').value;
+
+  $('save').disabled = true;
+  $('sync').disabled = true;
+  $('render').disabled = true;
+  $('inspector').disabled = true;
 }
 async function api(url,body){
   const response=await fetch(url,{cache:'no-store',...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})});
@@ -102,7 +125,7 @@ function selectScene(id,seekToStart=true){
   }
 }
 function queue(id,patch){
-  if(locked)return;
+  if (locked || currentProjectId) return;
   const scene=find(id);if(!scene)return;
   const clean={};
   for(const [key,value] of Object.entries(patch))if(key==='text'||Object.hasOwn(defaults,key))clean[key]=value;
@@ -141,7 +164,7 @@ function makeCards(){
     const id=String(scene.id),card=document.createElement('article');
     const button=document.createElement('button'),input=document.createElement('textarea');
     button.className='scene-title';button.textContent=`${id} · ${scene.start.toFixed(2)} → ${scene.end.toFixed(2)}s`;
-    input.value=scene.text;input.setAttribute('aria-label',`Lời thoại ${id}`);
+    input.value=scene.text;input.readOnly = true;input.setAttribute('aria-label',`Lời thoại ${id}`);
     card.onclick=()=>selectScene(id);
     button.onclick=e=>{e.stopPropagation();selectScene(id);};
     input.onclick=e=>{e.stopPropagation();if(selectedId!==id)selectScene(id);};
@@ -152,12 +175,31 @@ function makeCards(){
   }
   $('count').textContent=`${scenes.length} cảnh`;
 }
-async function load(){
-  const data=await api('/api/state');
-  scenes=data.scenes;revision=data.revision;config=data.config;loaded=true;
-  if(!find(selectedId))selectedId=String(scenes[0]?.id??'');
-  pending.clear();blocked=false;$('positionY').max=config.height-40;
-  makeCards();fillInspector();preview();return data;
+async function load() {
+  const data = await api('/api/state');
+  currentProjectId = data.project?.id ?? null;
+  scenes = data.scenes;
+  revision = data.revision;
+  config = data.config;
+  loaded = true;
+  editing = false;
+  selectedId = String(scenes[0]?.id ?? '');
+
+  pending.clear();
+  clearTimeout(timer);
+  blocked = false;
+  pendingSeek = null;
+
+  $('download').hidden = true;
+  $('positionY').max = config.height - 40;
+  $('projectLabel').textContent = data.project
+    ? `Đang mở: ${data.project.sourceFile}`
+    : 'Chưa chọn dự án';
+
+  makeCards();
+  fillInspector();
+  preview();
+  return data;
 }
 async function waitJob(id){
   for(;;){
@@ -189,6 +231,61 @@ for(const key of Object.keys(defaults))$(key).oninput=()=>{
   if($(key+'Value'))$(key+'Value').textContent=value;
   queue(selectedId,{[key]:value});
 };
+async function loadSources() {
+  const {files} = await api('/api/sources');
+  const previous = $('sourceSelect').value;
+  $('sourceSelect').replaceChildren();
+
+  for (const file of files) {
+    const option = document.createElement('option');
+    option.value = file.name;
+    option.textContent = file.name;
+    $('sourceSelect').append(option);
+  }
+
+  if (files.some(file => file.name === previous)) {
+    $('sourceSelect').value = previous;
+  }
+}
+
+function reloadStudio() {
+  instance = null;
+  lastReady = 0;
+  pendingSeek = null;
+  $('connection').textContent = 'Đang tải dự án vào Studio…';
+
+  const url = new URL('http://localhost:3000/MyComposition');
+  url.searchParams.set('reload', String(Date.now()));
+  $('studio').src = url.href;
+}
+
+$('sourceSelect').onchange = controls;
+
+$('sourcesReload').onclick = () => run(async () => {
+  await loadSources();
+  status('Đã đọc danh sách video trong 01_SOURCE.');
+});
+
+$('openSource').onclick = () => {
+  const file = $('sourceSelect').value;
+  if (!file) return;
+
+  if ((pending.size || saving) &&
+      !confirm('Bỏ thay đổi chưa lưu để mở video mới?')) return;
+
+  run(async () => {
+    clearTimeout(timer);
+    if (saving) await saving.catch(() => {});
+
+    status('Đang tạo và mở dự án…');
+    const created = await api('/api/projects', {file});
+    await api('/api/active-project', {id: created.id});
+
+    await load();
+    reloadStudio();
+    status(`Đã mở ${file} · Chế độ xem trước.`);
+  });
+};
 $('save').onclick=()=>run(async()=>{blocked=false;await flush();status('Đã lưu ✓');});
 $('reload').onclick=()=>{
   if((pending.size||saving)&&!confirm('Bỏ thay đổi chưa lưu và tải lại? Hãy sao chép lời thoại cần giữ trước.'))return;
@@ -214,7 +311,7 @@ $('apply').onclick=()=>{
   const style=styleOf(find(selectedId));for(const scene of scenes)queue(scene.id,style);
 };
 $('drag').onclick=()=>{editing=!editing;send({type:'PAUSE'});fillInspector();preview();};
-$('refresh').onclick=()=>{instance=null;lastReady=0;$('studio').src='http://localhost:3000/MyComposition';};
+$('refresh').onclick = reloadStudio;
 $('studio').onload=()=>{instance=null;send({type:'HELLO'});};
 window.addEventListener('message',event=>{
   if(event.origin!==STUDIO_ORIGIN||event.source!==$('studio').contentWindow||event.data?.channel!==CHANNEL)return;
@@ -244,10 +341,29 @@ window.addEventListener('beforeunload',event=>{
   if(pending.size||saving||locked){event.preventDefault();event.returnValue='';}
 });
 controls();
-(async()=>{
-  try{const data=await load();if(data.job?.status==='running'){await waitJob(data.job.id);await load();}status('Sẵn sàng · Tự lưu đang bật.');}
-  catch(error){report(error);}
-  finally{locked=false;controls();preview();send({type:'HELLO'});}
+
+(async () => {
+  try {
+    await loadSources();
+    const data = await load();
+
+    if (data.job?.status === 'running') {
+      await waitJob(data.job.id);
+      await load();
+    }
+
+    reloadStudio();
+    status(currentProjectId
+      ? 'Đã mở dự án gần nhất · Chế độ xem trước.'
+      : 'Chọn video từ 01_SOURCE rồi bấm Tạo & mở dự án.');
+  } catch (error) {
+    report(error);
+  } finally {
+    locked = false;
+    controls();
+    preview();
+    send({type: 'HELLO'});
+  }
 })();
 </script>
 </body>

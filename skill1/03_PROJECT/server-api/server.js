@@ -12,6 +12,28 @@ const CONFIG = path.join(PROJECT, 'src/video-config.json');
 const OUTPUT = path.resolve(__dirname, '../../05_FINAL/video.mp4');
 const PORT = Number(process.env.PORT || 3001);
 const app = express();
+const {execFile} = require('node:child_process');
+const {promisify} = require('node:util');
+const execFileAsync = promisify(execFile);
+
+const SKILL_DIR = path.resolve(__dirname, '../../');
+const SOURCE_DIR = path.join(SKILL_DIR, '01_SOURCE');
+const PROJECTS_DIR = path.join(SKILL_DIR, '00_SHARED_WORKSPACE', 'projects');
+const ACTIVE_PROJECT_FILE = path.join(
+  SKILL_DIR, '00_SHARED_WORKSPACE', 'active-project.json'
+);
+
+// Tự động tạo thư mục nếu chưa có
+fs.mkdirSync(SOURCE_DIR, {recursive: true});
+fs.mkdirSync(PROJECTS_DIR, {recursive: true});
+
+// Hàm tạo đường dẫn an toàn cho project
+function projectDir(id) {
+  if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)) {
+    throw new Error('projectId không hợp lệ'); // Dùng new Error thay cho fail() nếu bạn chưa có hàm fail()
+  }
+  return path.join(PROJECTS_DIR, id);
+}
 app.use(express.static(path.join(__dirname, '../web-dashboard/public')));
 let busy = false;
 let job = null;
@@ -41,18 +63,46 @@ function readConfig() {
   if (!Number.isFinite(config.fps) || config.fps <= 0) throw fail('fps không hợp lệ');
   return config;
 }
-function state() {
-  const {scenes, revision} = readScenes();
-  return {scenes, revision, config: readConfig(), job};
+function activeProjectId() {
+  if (!fs.existsSync(ACTIVE_PROJECT_FILE)) return null;
+  const {id} = readJson(ACTIVE_PROJECT_FILE);
+  projectDir(id); // Kiểm tra ID trước khi sử dụng.
+  return id;
 }
-function atomicWrite(data) {
-  const temp = `${SCENES}.${crypto.randomUUID()}.tmp`;
-  try {
-    fs.writeFileSync(temp, JSON.stringify(data, null, 2) + '\n', 'utf8');
-    fs.renameSync(temp, SCENES);
-  } finally {
-    if (fs.existsSync(temp)) fs.unlinkSync(temp);
+
+function projectState(id) {
+  const dir = projectDir(id);
+  const manifestPath = path.join(dir, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) {
+    throw fail('Không tìm thấy dự án', 404);
   }
+
+  const raw = fs.readFileSync(path.join(dir, 'scenes.json'), 'utf8');
+  const data = JSON.parse(raw.replace(/^\uFEFF/, ''));
+  const scenes = Array.isArray(data) ? data : data.scenes;
+  if (!Array.isArray(scenes)) throw fail('Dữ liệu cảnh không hợp lệ');
+
+  return {
+    project: readJson(manifestPath),
+    scenes,
+    revision: hash(raw),
+    config: readJson(path.join(dir, 'config.json')),
+    mediaPath: `/media/projects/${id}`,
+    job,
+  };
+}
+function state() {
+  const id = activeProjectId();
+  if (id) return projectState(id);
+
+  return {
+    project: null,
+    scenes: [],
+    revision: '',
+    config: readConfig(),
+    mediaPath: null,
+    job,
+  };
 }
 const ranges = {
   fontSize: [16, 160], positionX: [0, 100], maxWidth: [20, 100],
@@ -120,10 +170,107 @@ app.use('/api', (req, res, next) => {
   if (busy && req.method !== 'GET') return res.status(409).json({error: 'Server đang xử lý. Vui lòng chờ.'});
   next();
 });
+// Tạm chặn các API cũ trong giai đoạn nối xem trước.
+app.use(['/api/save', '/api/sync', '/api/render'], (req, res, next) => {
+  if (req.method !== 'POST') return next();
+  return res.status(409).json({
+    error: 'Chưa nối chức năng này với dự án mới.',
+  });
+});
+
+app.get('/api/active-project', (req, res) => {
+  res.json({id: activeProjectId()});
+});
+
+app.post('/api/active-project', (req, res) => {
+  const data = projectState(req.body?.id);
+  const sourceFile = data.project.sourceFile;
+
+  if (
+    typeof sourceFile !== 'string' ||
+    path.basename(sourceFile) !== sourceFile ||
+    !fs.existsSync(path.join(SOURCE_DIR, sourceFile))
+  ) {
+    throw fail('Không tìm thấy video nguồn trong 01_SOURCE', 404);
+  }
+
+  const temp = `${ACTIVE_PROJECT_FILE}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temp, JSON.stringify({id: data.project.id}), 'utf8');
+    fs.renameSync(temp, ACTIVE_PROJECT_FILE);
+  } finally {
+    if (fs.existsSync(temp)) fs.unlinkSync(temp);
+  }
+
+  res.json(state());
+});
 app.get('/api/state', (req, res) => res.json(state()));
-app.get('/api/scenes', (req, res) => res.json(readScenes().data));
+app.get('/api/scenes', (req, res) => {res.json({scenes: state().scenes});});
 app.get('/api/job', (req, res) => res.json({job}));
 app.post('/api/save', (req, res) => res.json(saveUpdates(req.body)));
+app.get('/api/sources', (req, res) => {
+  const files = fs.readdirSync(SOURCE_DIR, {withFileTypes: true})
+    .filter((item) => item.isFile())
+    .filter((item) => /\.(mp4|mov|mkv|webm)$/i.test(item.name))
+    .map((item) => ({name: item.name}));
+
+  res.json({files});
+});
+app.post('/api/projects', async (req, res, next) => {
+  let dir;
+  try {
+    const file = req.body?.file;
+    const available = fs.readdirSync(SOURCE_DIR, {withFileTypes: true});
+    if (typeof file !== 'string' || !available.some(
+      item => item.isFile() && item.name === file
+    )) throw fail('Video nguồn không tồn tại', 404);
+
+    const source = path.join(SOURCE_DIR, file);
+    const {stdout} = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration:stream=codec_type',
+      '-of', 'json', source
+    ], {windowsHide: true, timeout: 15000});
+
+    const metadata = JSON.parse(stdout);
+    const seconds = Number(metadata.format?.duration);
+    if (!metadata.streams?.some(s => s.codec_type === 'video') ||
+        !Number.isFinite(seconds) || seconds <= 0) {
+      throw fail('Không đọc được video hoặc thời lượng');
+    }
+
+    const id = crypto.randomUUID();
+    dir = projectDir(id);
+    fs.mkdirSync(dir);
+    const files = {
+      'manifest.json': {id, sourceFile: file, createdAt: new Date().toISOString()},
+      'transcript.json': {segments: []},
+      'scenes.json': {scenes: []},
+      'config.json': {
+        width: 1080, height: 1920, fps: 30,
+        durationInFrames: Math.ceil(seconds * 30)
+      }
+    };
+    for (const [name, data] of Object.entries(files)) {
+      fs.writeFileSync(path.join(dir, name), JSON.stringify(data, null, 2));
+    }
+    res.status(201).json({id, sourceFile: file});
+  } catch (error) {
+    next(error);
+  }
+});
+app.get('/api/projects/:id', (req, res) => {
+  const dir = projectDir(req.params.id);
+  const manifestPath = path.join(dir, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) throw new Error('Không tìm thấy dự án');
+
+  const manifest = readJson(manifestPath); // Đảm bảo bạn đã có hàm readJson() đọc file
+  res.json({
+    project: manifest,
+    scenes: readJson(path.join(dir, 'scenes.json')).scenes,
+    config: readJson(path.join(dir, 'config.json')),
+    mediaPath: `/media/projects/${req.params.id}`
+  });
+});
 
 function startJob(kind, executable, args, onSuccess) {
   busy = true;
@@ -181,6 +328,36 @@ app.get('/download/video.mp4', (req, res, next) => {
   res.download(OUTPUT, 'video.mp4', (error) => {if (error) next(error);});
 });
 app.use('/api', (req, res) => res.status(404).json({error: 'API không tồn tại'}));
+// Chỉ cho Studio local đọc dữ liệu và video qua trình duyệt.
+app.use(['/studio-state', '/media/projects'], (req, res, next) => {
+  const allowed = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+  ];
+  res.vary('Origin');
+  if (allowed.includes(req.headers.origin)) {
+    res.set('Access-Control-Allow-Origin', req.headers.origin);
+  }
+  next();
+});
+
+app.get('/studio-state', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(state());
+});
+app.get('/media/projects/:id', (req, res, next) => {
+  const manifestPath = path.join(projectDir(req.params.id), 'manifest.json');
+  if (!fs.existsSync(manifestPath)) throw fail('Không tìm thấy dự án', 404);
+
+  const {sourceFile} = readJson(manifestPath);
+  if (typeof sourceFile !== 'string' || path.basename(sourceFile) !== sourceFile) {
+    throw fail('Tên nguồn không hợp lệ');
+  }
+
+  res.sendFile(sourceFile, {root: SOURCE_DIR, dotfiles: 'deny'}, error => {
+    if (error) next(error);
+  });
+});
 app.use('/media', express.static(path.join(PROJECT, 'public')));
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false, setHeaders: (res) => res.set('Cache-Control', 'no-store'),
