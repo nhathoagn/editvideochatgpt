@@ -4,18 +4,29 @@
 **/dist/
 **/build/
 
-# 2. Bỏ qua toàn bộ file video/âm thanh gốc và file xuất ra
+# 2. Giữ cấu trúc thư mục làm việc nhưng bỏ qua file bên trong
 *.mp4
 *.mov
 *.avi
 *.mkv
 *.mp3
 *.wav
-source/
-01_SOURCE/
-02_FOOTAGE/
-04_PREVIEW/
-05_FINAL/
+
+source/*
+!source/.gitkeep
+
+01_SOURCE/*
+!01_SOURCE/.gitkeep
+
+02_FOOTAGE/*
+!02_FOOTAGE/.gitkeep
+
+04_PREVIEW/*
+!04_PREVIEW/.gitkeep
+
+05_FINAL/*
+!05_FINAL/.gitkeep
+
 **/out/
 **/public/input.mp4
 
