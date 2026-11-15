@@ -5,20 +5,20 @@
 **/build/
 
 # 2. Bỏ qua toàn bộ file video/âm thanh gốc và file xuất ra
-*.mp4
 *.mov
 *.avi
 *.mkv
 *.mp3
 *.wav
 source/
-01_SOURCE/
-02_FOOTAGE/
-04_PREVIEW/
+
+
 05_FINAL/
 **/out/
 **/public/input.mp4
 
+skill1/00_SHARED_WORKSPACE/projects/
+skill1/03_PROJECT/remotion-engine/public/*.mp4
 # 3. Bỏ qua file tạm của Python và hệ thống
 **/__pycache__/
 *.pyc
