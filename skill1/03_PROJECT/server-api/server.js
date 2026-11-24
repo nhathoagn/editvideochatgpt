@@ -41,8 +41,8 @@ let job = null;
 const fail = (message, status = 400) => Object.assign(new Error(message), {status});
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const hash = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
-function readScenes() {
-  const raw = fs.readFileSync(SCENES, 'utf8');
+function readScenes(file = SCENES) {
+  const raw = fs.readFileSync(file, 'utf8');
   const data = JSON.parse(raw.replace(/^\uFEFF/, ''));
   const scenes = Array.isArray(data) ? data : data.scenes;
   if (!Array.isArray(scenes)) throw fail('scenes.json phải là [...] hoặc {scenes: [...]}');
@@ -55,8 +55,8 @@ function readScenes() {
   }
   return {data, scenes, revision: hash(raw)};
 }
-function readConfig() {
-  const config = readJson(CONFIG);
+function readConfig(file = CONFIG) {
+  const config = readJson(file);
   for (const key of ['width', 'height', 'durationInFrames']) {
     if (!Number.isInteger(config[key]) || config[key] < 1) throw fail(`video-config.json: ${key} không hợp lệ`);
   }
@@ -133,24 +133,53 @@ function cleanPatch(update, config) {
   return patch;
 }
 function saveUpdates(body) {
-  const current = readScenes();
-  if (body?.revision !== current.revision) {
-    throw fail('Dữ liệu đã đổi ở tab/Studio khác. Sao chép lời thoại đang sửa rồi bấm Tải lại.', 409);
+  const projectId = activeProjectId();
+  if (!projectId || body?.projectId !== projectId) {
+    throw fail('Dự án đang mở đã thay đổi. Hãy tải lại Dashboard.', 409);
   }
-  if (!Array.isArray(body.updates)) throw fail('updates phải là mảng');
-  const config = readConfig();
+
+  const dir = projectDir(projectId);
+  const scenesFile = path.join(dir, 'scenes.json');
+  const current = readScenes(scenesFile);
+
+  if (body.revision !== current.revision) {
+    throw fail(
+      'Phụ đề đã thay đổi ở tab khác. Sao chép phần đang sửa rồi bấm Tải lại.',
+      409
+    );
+  }
+
+  if (!Array.isArray(body.updates)) {
+    throw fail('updates phải là mảng');
+  }
+
+  const config = readConfig(path.join(dir, 'config.json'));
+  const scenesById = new Map(current.scenes.map(scene => [String(scene.id), scene]));
   const seen = new Set();
+
   for (const update of body.updates) {
     const patch = cleanPatch(update, config);
     const id = String(update.id);
+
     if (seen.has(id)) throw fail(`Trùng cập nhật ${id}`);
     seen.add(id);
-    const scene = current.scenes.find((item) => String(item.id) === id);
+
+    const scene = scenesById.get(id);
     if (!scene) throw fail(`Không tìm thấy cảnh ${id}`, 404);
-    Object.assign(scene, patch); // Keep timing and unknown metadata unchanged.
+    Object.assign(scene, patch);
   }
-  if (body.updates.length) atomicWrite(current.data);
-  return state();
+
+  if (body.updates.length > 0) {
+    const temp = `${scenesFile}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temp, JSON.stringify(current.data, null, 2) + '\n', 'utf8');
+      fs.renameSync(temp, scenesFile);
+    } finally {
+      if (fs.existsSync(temp)) fs.unlinkSync(temp);
+    }
+  }
+
+  return projectState(projectId);
 }
 
 app.use(express.json({limit: '4mb'}));
@@ -170,8 +199,8 @@ app.use('/api', (req, res, next) => {
   if (busy && req.method !== 'GET') return res.status(409).json({error: 'Server đang xử lý. Vui lòng chờ.'});
   next();
 });
-// Tạm chặn các API cũ trong giai đoạn nối xem trước.
-app.use(['/api/save', '/api/render'], (req, res, next) => {
+// Giữ khóa render cho đến khi nối luồng xuất theo dự án.
+app.use('/api/render', (req, res, next) => {
   if (req.method !== 'POST') return next();
   return res.status(409).json({
     error: 'Chưa nối chức năng này với dự án mới.',

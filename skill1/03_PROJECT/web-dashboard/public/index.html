@@ -10,7 +10,7 @@
   <header>
     <div class="brand">VIDEO DASHBOARD <span>STUDIO 2.1</span></div>
     <button id="reload">Tải lại cảnh</button>
-    <button id="save">Lưu ngay / Thử lại</button>
+    <button id="save">Lưu phụ đề</button>
     <button id="sync">Đồng bộ Python</button>
     <button id="render">Xuất MP4</button>
     <a id="download" href="/download/video.mp4" hidden>Tải MP4</a>
@@ -54,7 +54,7 @@
         <button id="drag">Bật kéo chữ trong Preview</button>
         <button id="reset">Đặt lại định dạng cảnh</button>
         <button id="apply">Áp dụng kiểu cho tất cả</button>
-        <p class="hint">Tự lưu sau 400 ms ngừng chỉnh. Preview nhận thay đổi ngay.<br>Tắt kéo chữ khi phát thử để xem đúng hiệu ứng.</p>
+        <p class="hint">Studio hiện thay đổi ngay. Bấm Lưu phụ đề để giữ bản chỉnh.<br>Tắt kéo chữ khi phát thử để xem đúng hiệu ứng.</p>
       </fieldset>
     </aside>
   </main>
@@ -70,7 +70,7 @@ const fields = [
   ['backgroundOpacity','Độ đậm nền',0,1,.05],['strokeWidth','Độ dày viền',0,8,.5]
 ];
 let scenes=[], revision='', config=null, selectedId='', loaded=false, locked=true, editing=false;
-let timer=null, saving=null, blocked=false, instance=null, lastReady=0, pendingSeek=null, requestId=0, saveError='';
+let instance = null, lastReady = 0, pendingSeek = null, requestId = 0;
 const pending=new Map(), rows=new Map();
 let currentProjectId = null;
 const find = id => scenes.find(s=>String(s.id)===String(id));
@@ -90,10 +90,11 @@ function controls() {
   $('openSource').disabled =
     locked || !$('sourceSelect').value;
 
-  $('save').disabled = true;
-  $('sync').disabled = locked || !loaded || !currentProjectId;
+  const canEdit = loaded && Boolean(currentProjectId) && !locked;
+  $('save').disabled = !canEdit || pending.size === 0;
+  $('sync').disabled = !canEdit;
   $('render').disabled = true;
-  $('inspector').disabled = true;
+  $('inspector').disabled = !canEdit || !find(selectedId);
 }
 async function api(url,body){
   const response=await fetch(url,{cache:'no-store',...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})});
@@ -124,39 +125,51 @@ function selectScene(id,seekToStart=true){
     send(pendingSeek);
   }
 }
-function queue(id,patch){
-  if (locked || currentProjectId) return;
-  const scene=find(id);if(!scene)return;
-  const clean={};
-  for(const [key,value] of Object.entries(patch))if(key==='text'||Object.hasOwn(defaults,key))clean[key]=value;
-  Object.assign(scene,clean);
-  pending.set(String(id),{...pending.get(String(id)),...clean});
-  const row=rows.get(String(id));
-  if(row&&row.input.value!==scene.text)row.input.value=scene.text;
-  preview();clearTimeout(timer);
-  status(blocked?`Chưa lưu: ${saveError}`:'Đang chỉnh · Chưa lưu…',blocked);
-  if(!blocked)timer=setTimeout(()=>flush().catch(report),400);
-}
-function report(error){status(error.message,true);}
-function flush(){
-  clearTimeout(timer);
-  if(saving)return saving;
-  if(blocked)return Promise.reject(new Error('Tự lưu đang dừng. Bấm Lưu ngay / Thử lại hoặc tải lại sau khi sao chép dữ liệu.'));
-  if(!pending.size)return Promise.resolve();
-  saving=(async()=>{
-    while(pending.size){
-      const batch=new Map(pending);pending.clear();status('Đang tự lưu…');
-      try{
-        const result=await api('/api/save',{revision,updates:[...batch].map(([id,patch])=>({id,...patch}))});
-        revision=result.revision;
-      }catch(error){
-        for(const [id,patch] of batch)pending.set(id,{...patch,...pending.get(id)});
-        blocked=true;saveError=error.message;throw error;
-      }
+function queue(id, patch) {
+  if (locked || !loaded || !currentProjectId) return;
+
+  const scene = find(id);
+  if (!scene) return;
+
+  const clean = {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'text' || Object.hasOwn(defaults, key)) {
+      clean[key] = value;
     }
-    status('Đã tự lưu ✓');
-  })().finally(()=>{saving=null;});
-  return saving;
+  }
+  if (!Object.keys(clean).length) return;
+
+  const sceneId = String(id);
+  Object.assign(scene, clean);
+  pending.set(sceneId, {...pending.get(sceneId), ...clean});
+
+  const row = rows.get(sceneId);
+  if (row && row.input.value !== scene.text) {
+    row.input.value = scene.text;
+  }
+
+  preview();
+  controls();
+  status('Có thay đổi chưa lưu. Bấm Lưu phụ đề để giữ bản chỉnh.');
+}
+
+function report(error) {
+  status(error.message, true);
+}
+
+async function flush() {
+  if (!pending.size) return;
+
+  status('Đang lưu phụ đề…');
+  const result = await api('/api/save', {
+    projectId: currentProjectId,
+    revision,
+    updates: [...pending].map(([id, patch]) => ({id, ...patch})),
+  });
+
+  revision = result.revision;
+  pending.clear();
+  status('Đã lưu phụ đề.');
 }
 function makeCards(){
   rows.clear();$('scenes').replaceChildren();
@@ -164,7 +177,9 @@ function makeCards(){
     const id=String(scene.id),card=document.createElement('article');
     const button=document.createElement('button'),input=document.createElement('textarea');
     button.className='scene-title';button.textContent=`${id} · ${scene.start.toFixed(2)} → ${scene.end.toFixed(2)}s`;
-    input.value=scene.text;input.readOnly = true;input.setAttribute('aria-label',`Lời thoại ${id}`);
+    input.value = scene.text;
+    input.maxLength = 10000;
+    input.setAttribute('aria-label', `Lời thoại ${id}`);
     card.onclick=()=>selectScene(id);
     button.onclick=e=>{e.stopPropagation();selectScene(id);};
     input.onclick=e=>{e.stopPropagation();if(selectedId!==id)selectScene(id);};
@@ -186,8 +201,6 @@ async function load() {
   selectedId = String(scenes[0]?.id ?? '');
 
   pending.clear();
-  clearTimeout(timer);
-  blocked = false;
   pendingSeek = null;
 
   $('download').hidden = true;
@@ -220,6 +233,7 @@ async function waitJob(id){
 status(
   `${label}… ${Math.floor((Date.now() - job.startedAt) / 1000)}s`
 );
+await new Promise(resolve => setTimeout(resolve, 800));
   }
 }
 async function run(task){
@@ -277,12 +291,10 @@ $('openSource').onclick = () => {
   const file = $('sourceSelect').value;
   if (!file) return;
 
-  if ((pending.size || saving) &&
+  if (pending.size &&
       !confirm('Bỏ thay đổi chưa lưu để mở video mới?')) return;
 
   run(async () => {
-    clearTimeout(timer);
-    if (saving) await saving.catch(() => {});
 
     status('Đang tạo và mở dự án…');
     const created = await api('/api/projects', {file});
@@ -293,13 +305,21 @@ $('openSource').onclick = () => {
     status(`Đã mở ${file} · Chế độ xem trước.`);
   });
 };
-$('save').onclick=()=>run(async()=>{blocked=false;await flush();status('Đã lưu ✓');});
-$('reload').onclick=()=>{
-  if((pending.size||saving)&&!confirm('Bỏ thay đổi chưa lưu và tải lại? Hãy sao chép lời thoại cần giữ trước.'))return;
-  run(async()=>{
-    clearTimeout(timer);if(saving)await saving.catch(()=>{});
-    const data=await load();
-    if(data.job?.status==='running'){await waitJob(data.job.id);await load();}
+$('save').onclick = () => run(flush);
+
+$('reload').onclick = () => {
+  if (pending.size && !confirm(
+    'Tải lại sẽ bỏ thay đổi chưa lưu. Hãy sao chép lời thoại cần giữ trước.'
+  )) return;
+
+  run(async () => {
+    const data = await load();
+    if (data.job?.status === 'running') {
+      await waitJob(data.job.id);
+      await load();
+    }
+
+    reloadStudio();
     status('Đã tải dữ liệu mới nhất.');
   });
 };
@@ -311,8 +331,12 @@ $('render').onclick=()=>run(async()=>{
 $('sync').onclick = () => {
   if (locked || !currentProjectId) return;
 
+  const warning = pending.size
+    ? ' Các chỉnh sửa chưa lưu trên Dashboard sẽ bị bỏ nếu bóc băng thành công.'
+    : '';
+
   if (!confirm(
-    'Bóc băng video đang mở? Phụ đề hiện tại sẽ được sao lưu rồi tạo lại.'
+    'Bóc băng video đang mở? Phụ đề đã lưu sẽ được sao lưu rồi tạo lại.' + warning
   )) return;
 
   const projectId = currentProjectId;
@@ -368,7 +392,10 @@ setInterval(()=>{
   if(Date.now()-lastReady>5000)$('connection').textContent='Chưa nối · Kiểm tra Studio cổng 3000';
 },1500);
 window.addEventListener('beforeunload',event=>{
-  if(pending.size||saving||locked){event.preventDefault();event.returnValue='';}
+    if (pending.size || locked) {
+    event.preventDefault();
+    event.returnValue = '';
+  }
 });
 controls();
 
