@@ -4,29 +4,18 @@
 **/dist/
 **/build/
 
-# 2. Giữ cấu trúc thư mục làm việc nhưng bỏ qua file bên trong
+# 2. Bỏ qua toàn bộ file video/âm thanh gốc và file xuất ra
 *.mp4
 *.mov
 *.avi
 *.mkv
 *.mp3
 *.wav
-
-source/*
-!source/.gitkeep
-
-01_SOURCE/*
-!01_SOURCE/.gitkeep
-
-02_FOOTAGE/*
-!02_FOOTAGE/.gitkeep
-
-04_PREVIEW/*
-!04_PREVIEW/.gitkeep
-
-05_FINAL/*
-!05_FINAL/.gitkeep
-
+source/
+01_SOURCE/
+02_FOOTAGE/
+04_PREVIEW/
+05_FINAL/
 **/out/
 **/public/input.mp4
 
@@ -38,3 +27,8 @@ Thumbs.db
 
 **/.env
 *.bak
+
+# Bỏ qua dữ liệu dự án test cá nhân
+skill1/00_SHARED_WORKSPACE/projects/*
+!skill1/00_SHARED_WORKSPACE/projects/.gitkeep
+skill1/00_SHARED_WORKSPACE/active-project.json

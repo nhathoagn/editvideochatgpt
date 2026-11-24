@@ -171,7 +171,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 // Tạm chặn các API cũ trong giai đoạn nối xem trước.
-app.use(['/api/save', '/api/sync', '/api/render'], (req, res, next) => {
+app.use(['/api/save', '/api/render'], (req, res, next) => {
   if (req.method !== 'POST') return next();
   return res.status(409).json({
     error: 'Chưa nối chức năng này với dự án mới.',
@@ -292,6 +292,8 @@ function startJob(kind, executable, args, onSuccess) {
   try {
     const child = spawn(executable, args, {cwd: PROJECT, windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']});
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     const log = (chunk) => {active.log = (active.log + chunk.toString()).slice(-6000);};
     child.stdout.on('data', log);
     child.stderr.on('data', log);
@@ -314,14 +316,54 @@ app.post('/api/render', (req, res) => {
     });
   res.status(202).json({...saved, job: active});
 });
-app.post('/api/sync', (req, res) => {
-  if (req.body?.revision !== readScenes().revision) throw fail('Dữ liệu đã thay đổi. Hãy tải lại trước khi đồng bộ.', 409);
-  const backupDir = path.join(PROJECT, 'out/backups');
-  fs.mkdirSync(backupDir, {recursive: true});
-  fs.copyFileSync(SCENES, path.join(backupDir, `scenes-${Date.now()}.json`));
-  const active = startJob('sync', process.env.PYTHON_EXE || 'python',
-    [path.join(PROJECT, 'build_scenes.py')], () => {readScenes();});
-  res.status(202).json({job: active});
+// Hai endpoint dùng chung một luồng bóc băng.
+app.post(['/api/transcribe', '/api/sync'], (req, res) => {
+  const id = activeProjectId();
+  if (!id) throw fail('Hãy chọn và mở một dự án trước.', 400);
+
+  // Tránh tab cũ yêu cầu xử lý nhầm dự án vừa được tab khác mở.
+  if (req.body?.projectId !== id) {
+    throw fail('Dự án đang mở đã thay đổi. Hãy tải lại Dashboard.', 409);
+  }
+
+  const current = projectState(id);
+  if (req.body?.revision !== current.revision) {
+    throw fail('Kịch bản đã thay đổi. Hãy tải lại trước khi bóc băng.', 409);
+  }
+
+  const file = current.project.sourceFile;
+  if (typeof file !== 'string' || !file || path.basename(file) !== file) {
+    throw fail('Tên video trong manifest không hợp lệ.');
+  }
+
+  const video = path.join(SOURCE_DIR, file);
+  if (!fs.existsSync(video) || !fs.statSync(video).isFile()) {
+    throw fail('Không tìm thấy video nguồn trong 01_SOURCE.', 404);
+  }
+
+  const script = path.resolve(__dirname, '../python-scripts/boc_bang.py');
+  if (!fs.existsSync(script)) {
+    throw fail('Không tìm thấy python-scripts/boc_bang.py.', 500);
+  }
+
+  const active = startJob(
+    'transcribe',
+    process.env.PYTHON_EXE || 'py',
+    ['-u', script, video, projectDir(id)],
+    () => {
+      const transcript = readJson(
+        path.join(projectDir(id), 'transcript.json')
+      );
+      const updated = projectState(id);
+
+      if (!Array.isArray(transcript.segments) || !updated.scenes.length) {
+        throw fail('Python kết thúc nhưng dữ liệu kết quả chưa hợp lệ.', 500);
+      }
+    }
+  );
+
+  active.projectId = id;
+  res.status(202).json({projectId: id, job: active});
 });
 app.get('/download/video.mp4', (req, res, next) => {
   if (!fs.existsSync(OUTPUT)) return res.status(404).send('Chưa có video xuất');

@@ -91,7 +91,7 @@ function controls() {
     locked || !$('sourceSelect').value;
 
   $('save').disabled = true;
-  $('sync').disabled = true;
+  $('sync').disabled = locked || !loaded || !currentProjectId;
   $('render').disabled = true;
   $('inspector').disabled = true;
 }
@@ -211,8 +211,15 @@ async function waitJob(id){
       if(job.kind==='render')$('download').hidden=false;
       return job;
     }
-    status(`${job.kind==='render'?'Đang xuất MP4':'Đang đồng bộ Python'}… ${Math.floor((Date.now()-job.startedAt)/1000)}s`);
-    await new Promise(resolve=>setTimeout(resolve,800));
+    const label = job.kind === 'render'
+  ? 'Đang xuất MP4'
+  : job.kind === 'transcribe'
+    ? 'Đang bóc băng Whisper'
+    : 'Đang đồng bộ Python';
+
+status(
+  `${label}… ${Math.floor((Date.now() - job.startedAt) / 1000)}s`
+);
   }
 }
 async function run(task){
@@ -301,9 +308,32 @@ $('render').onclick=()=>run(async()=>{
   const data=await api('/api/render',{revision,updates:[]});revision=data.revision;
   const job=await waitJob(data.job.id);status(`Hoàn tất: ${job.output}`);
 });
-$('sync').onclick=()=>{
-  if(!confirm('Python sẽ tạo lại lời thoại và định dạng. Bản hiện tại được tự lưu rồi sao lưu vào out/backups. Tiếp tục?'))return;
-  run(async()=>{await flush();const data=await api('/api/sync',{revision});await waitJob(data.job.id);await load();status('Đồng bộ hoàn tất.');});
+$('sync').onclick = () => {
+  if (locked || !currentProjectId) return;
+
+  if (!confirm(
+    'Bóc băng video đang mở? Phụ đề hiện tại sẽ được sao lưu rồi tạo lại.'
+  )) return;
+
+  const projectId = currentProjectId;
+  const requestedRevision = revision;
+
+  run(async () => {
+    $('logs').hidden = false;
+    $('log').textContent = '';
+    status('Đang khởi động Whisper…');
+
+    const data = await api('/api/transcribe', {
+      projectId,
+      revision: requestedRevision,
+    });
+
+    await waitJob(data.job.id);
+    await load();
+    reloadStudio();
+
+    status(`Bóc băng hoàn tất · ${scenes.length} cảnh.`);
+  });
 };
 $('reset').onclick=()=>{queue(selectedId,defaults);fillInspector();};
 $('apply').onclick=()=>{

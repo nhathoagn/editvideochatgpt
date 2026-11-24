@@ -1,90 +1,129 @@
 # -*- coding: utf-8 -*-
-r"""Chay local: py D:\boc_bang.py
-
-Khong goi API, khong tai video len mang, khong render video.
-Whisper co the tai model small lan dau neu may chua co model.
-Moc segment cua Whisper la doan loi noi, khong luon trung tron mot cau.
-"""
-
 import json
-from pathlib import Path
+import math
+import os
 import shutil
 import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
-VIDEO_PATH = Path(r"D:\editvideochatgpt\source\phuongdi1.mp4")
+
+def read_json(file):
+    return json.loads(file.read_text(encoding="utf-8-sig"))
 
 
-def timestamp(seconds):
-    milliseconds = round(float(seconds) * 1000)
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, milliseconds = divmod(remainder, 1000)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+def write_json(file, data):
+    # Ghi file tạm rồi thay thế, tránh JSON đang ghi dở.
+    temp = file.with_name(f"{file.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp, file)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def main():
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-    if not VIDEO_PATH.is_file():
-        raise FileNotFoundError(f"Không tìm thấy video: {VIDEO_PATH}")
-    if shutil.which("ffmpeg") is None:
+    if len(sys.argv) != 3:
         raise RuntimeError(
-            "Không tìm thấy FFmpeg trong PATH. Hãy thêm thư mục chứa "
-            "ffmpeg.exe vào PATH, mở lại CMD rồi chạy lại."
+            'Cách chạy: py boc_bang.py "video.mp4" "thu_muc_project"'
         )
+
+    video = Path(sys.argv[1]).resolve()
+    project = Path(sys.argv[2]).resolve()
+
+    if not video.is_file():
+        raise FileNotFoundError(f"Không tìm thấy video: {video}")
+    if not project.is_dir():
+        raise FileNotFoundError(f"Không tìm thấy dự án: {project}")
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("Không tìm thấy ffmpeg trong PATH.")
+
+    manifest = read_json(project / "manifest.json")
+    config = read_json(project / "config.json")
+    if manifest.get("sourceFile") != video.name:
+        raise RuntimeError("Video không khớp manifest của dự án.")
+
+    duration = config["durationInFrames"] / config["fps"]
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("Thời lượng dự án không hợp lệ.")
+
+    print(f"Video nguồn: {video}", flush=True)
+    print(f"Dự án: {project.name}", flush=True)
+    print("Đang nạp Whisper small trên CPU...", flush=True)
 
     import torch
     import whisper
 
-    # CPU để chạy được cả khi PyTorch không hỗ trợ CUDA trên máy.
-    torch.set_num_threads(4)
-    print("Đang nạp Whisper small trên CPU của máy bạn...", flush=True)
+    torch.set_num_threads(2)
     model = whisper.load_model("small", device="cpu")
-    print("Đang bóc băng tiếng Việt; không gửi video lên đám mây...", flush=True)
+
+    print("Đang bóc băng và tự nhận diện ngôn ngữ...", flush=True)
     result = model.transcribe(
-        str(VIDEO_PATH),
-        language="vi",
+        str(video),
         task="transcribe",
+        language=None,
         word_timestamps=True,
         fp16=False,
         temperature=0,
         verbose=False,
     )
 
-    print("\nTRANSCRIPT THEO ĐOẠN/CÂU WHISPER\n")
-    lines = []
-    for number, segment in enumerate(result["segments"], start=1):
+    scenes = []
+    for segment in result["segments"]:
         start = float(segment["start"])
         end = float(segment["end"])
         text = segment["text"].strip()
-        if not text:
+        if not text or not all(map(math.isfinite, [start, end])):
             continue
-        line = (
-            f"{number:03d}. [{timestamp(start)} - {timestamp(end)}] "
-            f"({start:.3f}s - {end:.3f}s) {text}"
-        )
-        print(line, flush=True)
-        lines.append(line)
 
-    # Luu canh file .py; JSON giu ca timestamp tung tu de sua phu de.
-    output_dir = Path(__file__).resolve().parent
-    txt_path = output_dir / "phuongdi1_transcript.txt"
-    json_path = output_dir / "phuongdi1_transcript.json"
-    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
-    json_path.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+        # Chỉ giới hạn cảnh; transcript gốc được giữ nguyên.
+        start, end = max(0.0, start), min(duration, end)
+        if end <= start:
+            continue
+
+        scenes.append({
+            "id": f"s{len(scenes) + 1}",
+            "start": start,
+            "end": end,
+            "text": text,
+            "fontSize": 52,
+            "positionY": 220,
+        })
+        print(f"[{start:.2f} -> {end:.2f}] {text}", flush=True)
+
+    if not scenes:
+        raise RuntimeError(
+            "Không nhận dạng được lời thoại hợp lệ; giữ nguyên dữ liệu cũ."
+        )
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup = project / "backups" / f"transcribe-{stamp}-{uuid.uuid4().hex[:8]}"
+    backup.mkdir(parents=True)
+    for name in ("transcript.json", "scenes.json"):
+        old_file = project / name
+        if old_file.exists():
+            shutil.copy2(old_file, backup / name)
+
+    write_json(project / "transcript.json", result)
+    write_json(project / "scenes.json", {"scenes": scenes})
+    print(
+        f"Hoàn tất: {len(scenes)} cảnh; ngôn ngữ: {result.get('language')}",
+        flush=True,
     )
-    print(f"\nĐã lưu: {txt_path}\nĐã lưu: {json_path}")
-    print("Hãy nghe đối chiếu các từ và số liệu chưa rõ trước khi chốt phụ đề.")
 
 
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     try:
         main()
     except KeyboardInterrupt:
-        print("\nĐã dừng theo yêu cầu.", file=sys.stderr)
         sys.exit(130)
     except Exception as error:
-        print(f"\nLỗi: {error}", file=sys.stderr)
+        print(f"Lỗi: {error}", file=sys.stderr, flush=True)
         sys.exit(1)
