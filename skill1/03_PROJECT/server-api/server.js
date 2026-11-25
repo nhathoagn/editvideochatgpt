@@ -9,7 +9,7 @@ const PROJECT = process.env.VIDEO_PROJECT || path.resolve(__dirname, '../remotio
 const requireProject = createRequire(path.join(PROJECT, 'package.json'));
 const SCENES = path.join(PROJECT, 'src/scenes.json');
 const CONFIG = path.join(PROJECT, 'src/video-config.json');
-const OUTPUT = path.resolve(__dirname, '../../05_FINAL/video.mp4');
+const FINAL_DIR = path.resolve(__dirname, '../../05_FINAL');
 const PORT = Number(process.env.PORT || 3001);
 const app = express();
 const {execFile} = require('node:child_process');
@@ -34,6 +34,15 @@ function projectDir(id) {
   }
   return path.join(PROJECTS_DIR, id);
 }
+function projectOutput(id) {
+  projectDir(id); // Dùng lại kiểm tra ID hiện có.
+  return path.join(FINAL_DIR, id, 'video.mp4');
+}
+
+function projectDownloadUrl(id) {
+  return `/download/projects/${encodeURIComponent(id)}/video.mp4`;
+}
+
 app.use(express.static(path.join(__dirname, '../web-dashboard/public')));
 let busy = false;
 let job = null;
@@ -88,6 +97,7 @@ function projectState(id) {
     revision: hash(raw),
     config: readJson(path.join(dir, 'config.json')),
     mediaPath: `/media/projects/${id}`,
+    downloadUrl: fs.existsSync(projectOutput(id)) ? projectDownloadUrl(id) : null,
     job,
   };
 }
@@ -199,13 +209,6 @@ app.use('/api', (req, res, next) => {
   if (busy && req.method !== 'GET') return res.status(409).json({error: 'Server đang xử lý. Vui lòng chờ.'});
   next();
 });
-// Giữ khóa render cho đến khi nối luồng xuất theo dự án.
-app.use('/api/render', (req, res, next) => {
-  if (req.method !== 'POST') return next();
-  return res.status(409).json({
-    error: 'Chưa nối chức năng này với dự án mới.',
-  });
-});
 
 app.get('/api/active-project', (req, res) => {
   res.json({id: activeProjectId()});
@@ -301,7 +304,17 @@ app.get('/api/projects/:id', (req, res) => {
   });
 });
 
-function startJob(kind, executable, args, onSuccess) {
+function removeRenderTemps(files) {
+  for (const file of files) {
+    try {
+      fs.rmSync(file, {force: true});
+    } catch (error) {
+      console.warn(`Không dọn được file tạm ${path.basename(file)}: ${error.message}`);
+    }
+  }
+}
+
+function startJob(kind, executable, args, onSuccess, temporaryFiles = []) {
   busy = true;
   job = {id: crypto.randomUUID(), kind, status: 'running', startedAt: Date.now(), log: ''};
   const active = job;
@@ -310,12 +323,17 @@ function startJob(kind, executable, args, onSuccess) {
     if (completed) return;
     completed = true;
     if (!error) {
-      try {onSuccess?.();} catch (cause) {error = cause;}
+      try {
+        onSuccess?.(active);
+      } catch (cause) {
+        error = cause;
+      }
     }
+
+    removeRenderTemps(temporaryFiles);
     active.status = error ? 'error' : 'done';
     active.error = error ? error.message : null;
     active.finishedAt = Date.now();
-    if (!error && kind === 'render') active.output = OUTPUT;
     busy = false;
   }
   try {
@@ -332,17 +350,64 @@ function startJob(kind, executable, args, onSuccess) {
   return active;
 }
 app.post('/api/render', (req, res) => {
-  // Saving and locking happen in one request: another tab cannot edit between them.
-  fs.mkdirSync(path.dirname(OUTPUT), {recursive: true});
-  if (!fs.existsSync(path.join(PROJECT, 'public/input.mp4'))) throw fail('Thiếu public/input.mp4');
-  const cli = path.join(path.dirname(requireProject.resolve('@remotion/cli/package.json')), 'remotion-cli.js');
+  // saveUpdates kiểm tra projectId và revision trước khi ghi.
   const saved = saveUpdates(req.body);
-  const tempOutput = path.join(PROJECT, 'out/video-rendering.mp4');
-  const active = startJob('render', process.execPath,
-    [cli, 'render', 'MyComposition', tempOutput, '--codec=h264'], () => {
-      if (!fs.existsSync(tempOutput) || !fs.statSync(tempOutput).size) throw fail('Không tạo được MP4');
-      fs.renameSync(tempOutput, OUTPUT);
-    });
+  const projectId = req.body.projectId;
+  const sourceFile = saved.project.sourceFile;
+
+  if (typeof sourceFile !== 'string' ||
+      !sourceFile ||
+      path.basename(sourceFile) !== sourceFile) {
+    throw fail('Tên video trong manifest không hợp lệ.');
+  }
+
+  const source = path.join(SOURCE_DIR, sourceFile);
+  if (!fs.statSync(source, {throwIfNoEntry: false})?.isFile()) {
+    throw fail('Không tìm thấy video nguồn trong 01_SOURCE.', 404);
+  }
+
+  const cliPackage = requireProject.resolve('@remotion/cli/package.json');
+  const cli = path.join(path.dirname(cliPackage), 'remotion-cli.js');
+  const output = projectOutput(projectId);
+  const outputDir = path.dirname(output);
+  fs.mkdirSync(outputDir, {recursive: true});
+
+  const suffix = crypto.randomUUID();
+  const propsFile = path.join(outputDir, `.render-${suffix}.json`);
+  const tempOutput = path.join(outputDir, `.render-${suffix}.mp4`);
+
+  const {width, height, fps, durationInFrames} = saved.config;
+  const props = {
+    videoSrc: new URL(saved.mediaPath, `http://127.0.0.1:${PORT}`).href,
+    scenes: saved.scenes,
+    renderConfig: {width, height, fps, durationInFrames},
+  };
+
+  try {
+    fs.writeFileSync(propsFile, JSON.stringify(props), 'utf8');
+  } catch (error) {
+    removeRenderTemps([propsFile]);
+    throw error;
+  }
+
+  const active = startJob(
+    'render',
+    process.execPath,
+    [cli, 'render', 'MyComposition', tempOutput, '--codec=h264', `--props=${propsFile}`],
+    (finishedJob) => {
+      const file = fs.statSync(tempOutput, {throwIfNoEntry: false});
+      if (!file?.isFile() || file.size === 0) {
+        throw fail('Remotion chưa tạo được file MP4.', 500);
+      }
+
+      fs.renameSync(tempOutput, output);
+      finishedJob.output = output;
+      finishedJob.downloadUrl = projectDownloadUrl(projectId);
+    },
+    [propsFile, tempOutput]
+  );
+
+  active.projectId = projectId;
   res.status(202).json({...saved, job: active});
 });
 // Hai endpoint dùng chung một luồng bóc băng.
@@ -394,9 +459,16 @@ app.post(['/api/transcribe', '/api/sync'], (req, res) => {
   active.projectId = id;
   res.status(202).json({projectId: id, job: active});
 });
-app.get('/download/video.mp4', (req, res, next) => {
-  if (!fs.existsSync(OUTPUT)) return res.status(404).send('Chưa có video xuất');
-  res.download(OUTPUT, 'video.mp4', (error) => {if (error) next(error);});
+app.get('/download/projects/:id/video.mp4', (req, res, next) => {
+  const output = projectOutput(req.params.id);
+  if (!fs.statSync(output, {throwIfNoEntry: false})?.isFile()) {
+    return res.status(404).send('Dự án này chưa có video xuất.');
+  }
+
+  res.set('Cache-Control', 'no-store');
+  res.download(output, 'video.mp4', (error) => {
+    if (error) next(error);
+  });
 });
 app.use('/api', (req, res) => res.status(404).json({error: 'API không tồn tại'}));
 // Chỉ cho Studio local đọc dữ liệu và video qua trình duyệt.

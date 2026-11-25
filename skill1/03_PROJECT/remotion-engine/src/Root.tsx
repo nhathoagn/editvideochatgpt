@@ -20,10 +20,40 @@ type StudioState = {
   };
 };
 
-const metadata: CalculateMetadataFunction<VideoProps> = async ({
+type RenderProps = VideoProps & {
+  renderConfig?: StudioState['config'];
+};
+
+const defaultProps: RenderProps = {scenes: [], videoSrc: ''};
+
+const metadata: CalculateMetadataFunction<RenderProps> = async ({
   props,
   abortSignal,
+  isRendering,
 }) => {
+  if (props.renderConfig) {
+    const {width, height, fps, durationInFrames} = props.renderConfig;
+
+    if (
+      ![width, height, durationInFrames].every(
+        (value) => Number.isInteger(value) && value > 0,
+      ) ||
+      !Number.isFinite(fps) ||
+      fps <= 0
+    ) {
+      throw new Error('Cấu hình khung hình hoặc thời lượng xuất không hợp lệ.');
+    }
+
+    if (!Array.isArray(props.scenes) || !props.videoSrc?.trim()) {
+      throw new Error('Thiếu nguồn video hoặc danh sách cảnh cho lần xuất.');
+    }
+
+    return {width, height, fps, durationInFrames, props};
+  }
+
+  if (isRendering) {
+    throw new Error('Thiếu dữ liệu dự án để render. Hãy xuất MP4 từ Dashboard.');
+  }
   const response = await fetch(`${API}/studio-state`, {
     cache: 'no-store',
     signal: abortSignal,
@@ -58,7 +88,7 @@ export const RemotionRoot = () => (
     height={1920}
     fps={30}
     durationInFrames={1}
-    defaultProps={{scenes: [], videoSrc: ''}}
+    defaultProps={defaultProps}
     calculateMetadata={metadata}
   />
 );

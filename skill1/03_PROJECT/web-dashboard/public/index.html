@@ -13,7 +13,7 @@
     <button id="save">Lưu phụ đề</button>
     <button id="sync">Đồng bộ Python</button>
     <button id="render">Xuất MP4</button>
-    <a id="download" href="/download/video.mp4" hidden>Tải MP4</a>
+    <a id="download" download="video.mp4" hidden>Tải MP4</a>
     <button id="sourcesReload">Đọc 01_SOURCE</button>
 
     <select id="sourceSelect" aria-label="Chọn video nguồn">
@@ -93,7 +93,7 @@ function controls() {
   const canEdit = loaded && Boolean(currentProjectId) && !locked;
   $('save').disabled = !canEdit || pending.size === 0;
   $('sync').disabled = !canEdit;
-  $('render').disabled = true;
+  $('render').disabled = !canEdit;
   $('inspector').disabled = !canEdit || !find(selectedId);
 }
 async function api(url,body){
@@ -190,6 +190,18 @@ function makeCards(){
   }
   $('count').textContent=`${scenes.length} cảnh`;
 }
+function setDownload(url) {
+  const link = $('download');
+
+  if (url) {
+    link.href = url;
+  } else {
+    link.removeAttribute('href');
+  }
+
+  link.hidden = !url;
+}
+
 async function load() {
   const data = await api('/api/state');
   currentProjectId = data.project?.id ?? null;
@@ -203,7 +215,7 @@ async function load() {
   pending.clear();
   pendingSeek = null;
 
-  $('download').hidden = true;
+  setDownload(data.downloadUrl);
   $('positionY').max = config.height - 40;
   $('projectLabel').textContent = data.project
     ? `Đang mở: ${data.project.sourceFile}`
@@ -214,26 +226,44 @@ async function load() {
   preview();
   return data;
 }
-async function waitJob(id){
-  for(;;){
-    const {job}=await api('/api/job');
-    if(!job||job.id!==id)throw new Error('Không tìm thấy tác vụ. Kiểm tra server và thư mục out.');
-    $('logs').hidden=false;$('log').textContent=job.log||'';
-    if(job.status==='error')throw new Error(job.error||'Tác vụ lỗi; xem log.');
-    if(job.status==='done'){
-      if(job.kind==='render')$('download').hidden=false;
+async function waitJob(id) {
+  const panel = $('logs');
+  const log = $('log');
+  panel.hidden = false;
+  panel.open = true;
+
+  for (;;) {
+    const {job} = await api('/api/job');
+
+    if (!job || job.id !== id) {
+      throw new Error('Không tìm thấy tác vụ. Hãy tải lại cảnh để kiểm tra.');
+    }
+
+    log.textContent = (job.log || '')
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/\r\n?/g, '\n');
+
+    if (job.status === 'error') {
+      throw new Error(job.error || 'Tác vụ thất bại. Xem log để biết chi tiết.');
+    }
+
+    if (job.status === 'done') {
+      if (job.kind === 'render' && job.projectId === currentProjectId) {
+        setDownload(job.downloadUrl);
+      }
       return job;
     }
-    const label = job.kind === 'render'
-  ? 'Đang xuất MP4'
-  : job.kind === 'transcribe'
-    ? 'Đang bóc băng Whisper'
-    : 'Đang đồng bộ Python';
 
-status(
-  `${label}… ${Math.floor((Date.now() - job.startedAt) / 1000)}s`
-);
-await new Promise(resolve => setTimeout(resolve, 800));
+    const label = job.kind === 'render'
+      ? 'Đang xuất MP4'
+      : job.kind === 'transcribe'
+        ? 'Đang bóc băng Whisper'
+        : 'Đang đồng bộ Python';
+
+    const seconds = Math.floor((Date.now() - job.startedAt) / 1000);
+    status(`${label}… ${seconds}s`);
+
+    await new Promise(resolve => setTimeout(resolve, 800));
   }
 }
 async function run(task){
@@ -323,10 +353,26 @@ $('reload').onclick = () => {
     status('Đã tải dữ liệu mới nhất.');
   });
 };
-$('render').onclick=()=>run(async()=>{
-  await flush();editing=false;fillInspector();preview();$('download').hidden=true;
-  const data=await api('/api/render',{revision,updates:[]});revision=data.revision;
-  const job=await waitJob(data.job.id);status(`Hoàn tất: ${job.output}`);
+$('render').onclick = () => run(async () => {
+  if (!loaded || !currentProjectId) return;
+
+  status('Đang lưu phụ đề và bắt đầu xuất MP4…');
+
+  const data = await api('/api/render', {
+    projectId: currentProjectId,
+    revision,
+    updates: [...pending].map(([id, patch]) => ({id, ...patch})),
+  });
+
+  revision = data.revision;
+  pending.clear();
+  editing = false;
+  fillInspector();
+  preview();
+
+  $('log').textContent = '';
+  await waitJob(data.job.id);
+  status('Xuất MP4 hoàn tất. Bấm Tải MP4 để tải video.');
 });
 $('sync').onclick = () => {
   if (locked || !currentProjectId) return;
